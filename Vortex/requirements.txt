@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+redis
+celery
+groq
+prometheus-client
+sqlalchemy
+opentelemetry-sdk
