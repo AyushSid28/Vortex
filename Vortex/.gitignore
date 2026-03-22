@@ -2,3 +2,6 @@ README.md
 PLAN.md
 .env
 docker-compose.yml
+__pycache__/
+*.pyc
+.pytest_cache/
