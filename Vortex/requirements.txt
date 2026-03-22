@@ -6,3 +6,5 @@ groq
 prometheus-client
 sqlalchemy
 opentelemetry-sdk
+pytest
+pytest-asyncio
