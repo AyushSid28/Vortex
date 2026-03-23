@@ -7,18 +7,28 @@ from typing import Any
 
 from vortex.workflow import Workflow
 from vortex.agent import Agent,AgentResult,AgentStatus
+from vortex.retry import retry_with_backoff
+from vortex.state import StateManager,RunState
 
 
 
 class WorkflowEngine:
+
+  def __init__(self,state_manager:StateManager| None=None):
+    self.state_manager=state_manager or StateManager()
+
+
   async def run(self,workflow:Workflow,input_data:dict[str,Any])->dict[str,Any]:
     """Execute a workflow with input data"""
+    run=self.state.create_run(
+      workflow.name,list(workflow.agents.keys()),input_data
+    )
     state=dict(input_data)
-    agent_results:dict[str,AgentResult]={}
+   
     levels=workflow.topological_order()
 
-
-    for level in levels:
+    try:
+     for level in levels:
       runnable=self._resolve_level(level,workflow,state)
       tasks=[
         self._execute_agent(workflow.agents[name],state)
@@ -28,31 +38,51 @@ class WorkflowEngine:
 
       for name,result in zip(runnable,results):
         if isinstance(result,Exception):
-          agent_results[name]=AgentResult(
-            output={},status=AgentStatus.FAILED,error=str(result)
-
-          )
+          self.state.mark_agent_failed(run.run_id,name,str(result))
+          self.state.fail_run(run.run_id,str(result))
           raise result
-        agent_results[name]=result
+
+
+
+
+        if result.status==AgentStatus.FAILED:
+          self.state.fail_run(run.run_id,result.error or "agent failed")
+          raise RuntimeError(
+            f"Agent {name!r} failed after {result.retry_count} retries:"
+            f"{result.error}"
+          )
+
+        self.state.mark_agent_completed(
+          run.run_id,name,result.output,result.retry_count
+        )
         state.update(result.output)
 
-    return state 
+
+      self.state.complete_run(run.run_id)
+          
+    except Exception as e:
+      if self.state.get_run(run.run_id).status!="FAILED":
+        self.state.fail_run(run.run_id,str(e))
+
+      raise
+    return state
 
 
 
-  async def _execute_agent(self,agent:Agent,state:dict[str,Any])->AgentResult:
+  async def _execute_agent(self,agent:Agent,state:dict[str,Any],run_id:str)->AgentResult:
+    self.state.mark_agent_running(run_id,agent.name)
     start=time.perf_counter()
     try:
-      output=await agent.execute(state)
+      coro=retry_with_backoff(agent,state)
+      result=await asyncio.wait_for(coro,timeout=agent.timeout)
+      
+    except asyncio.TimeoutError:
       duration=(time.perf_counter()-start)*1000
       return AgentResult(
-        output=output,status=AgentStatus.COMPLETED,duration_ms=duration
+        output={},status=AgentStatus.FAILED,error=f"Agent {agent.name!r} timed out after {agent.timeout}s",duration_ms=duration
       )
-    except Exception as e:
-      duration=(time.perf_counter()-start)*1000
-      return AgentResult(
-        output={},status=AgentStatus.FAILED,error=str(e),duration_ms=duration
-      )
+    result.duration_ms=(time.perf_counter()-start)*1000
+    return result
 
 
   def _resolve_level(
