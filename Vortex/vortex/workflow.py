@@ -118,5 +118,5 @@ class Workflow:
        for ce in self.conditional_edges:
           if ce.true_target == target or ce.false_target == target:
                return ce
-          return None
+       return None
         
