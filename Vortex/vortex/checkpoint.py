@@ -9,7 +9,7 @@ from typing import Any
 class Checkpoint:
     run_id:str
     workflow_name:str
-    complete_agents:list[str]=field(default_factory=list)
+    completed_agents:list[str]=field(default_factory=list)
     agent_outputs:dict[str,Any]=field(default_factory=dict)
     shared_state:dict[str,Any]=field(default_factory=dict)
     last_completed_level:int=-1

@@ -5,66 +5,78 @@ import asyncio
 import time
 from typing import Any
 
-from Vortex.vortex import human_loop
 from vortex.workflow import Workflow
 from vortex.agent import Agent, AgentResult, AgentStatus
 from vortex.retry import retry_with_backoff
 from vortex.state import StateManager, RunStatus
-from vortex.human_loop import HumanLoop,ApprovalStatus
-from vortex.checkpoint import CheckpointStore,Checkpoint
+from vortex.checkpoint import Checkpoint, CheckpointStore
+from vortex.human_loop import HumanLoop, ApprovalStatus
 
 
 class WorkflowEngine:
 
-    def __init__(self, state_manager: StateManager | None = None,checkpoint_store:CheckpointStore | None=None,):
+    def __init__(
+        self,
+        state_manager: StateManager | None = None,
+        checkpoint_store: CheckpointStore | None = None,
+        human_loop: HumanLoop | None = None,
+    ):
         self.state_manager = state_manager or StateManager()
-        self.checkpoint_store=checkpoint_store
-        self.human_loop=human_loop
+        self.checkpoint_store = checkpoint_store
+        self.human_loop = human_loop
 
-    async def run(self, workflow: Workflow, input_data: dict[str, Any],reume_run_id:str | None=None) -> dict[str, Any]:
-        """Execute a workflow with input data."""
-        start_level=0
-        completed:set[str]=set()
+    async def run(
+        self,
+        workflow: Workflow,
+        input_data: dict[str, Any],
+        resume_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a workflow. Pass resume_run_id to restart from last checkpoint."""
 
-        if resume_run_id and self.chekpoint_store:
-            cp=self.checkpoint_store.load(resume_run_id)
+        start_level = 0
+        completed: set[str] = set()
+
+        if resume_run_id and self.checkpoint_store:
+            cp = self.checkpoint_store.load(resume_run_id)
             if cp is None:
-                raise ValueError(f"No checkpoint found for run{resume_run_id}")
-            state=dict(cp.shared_state)
-            completed=set(cp.complete_agents)
+                raise ValueError(f"No checkpoint found for run {resume_run_id!r}")
+            state = dict(cp.shared_state)
+            start_level = cp.last_completed_level + 1
+            completed = set(cp.completed_agents)
         else:
-            state=dict(input_data)
+            state = dict(input_data)
 
-        run=self.self.state_manager.create_run(
-            workflow.name,list(workflow.agents.keys()),input_data
+        run = self.state_manager.create_run(
+            workflow.name, list(workflow.agents.keys()), input_data
         )
 
         for name in completed:
-            self.state_manager.mark_agent_completed(run.run_id,name,{})
+            self.state_manager.mark_agent_completed(run.run_id, name, {})
 
-        checkpoint=Checkpoint(
+        checkpoint = Checkpoint(
             run_id=run.run_id,
             workflow_name=workflow.name,
             shared_state=dict(state),
-            complete_agents=list(completed),
+            completed_agents=list(completed),
         ) if self.checkpoint_store else None
 
-        levels=workflow.topological_order()
+        levels = workflow.topological_order()
+
         try:
-            for level_idx,level in levels:
+            for level_idx, level in enumerate(levels):
                 if level_idx < start_level:
                     continue
 
-                runnable=self._resolve_level(level,workflow,state)
-                runnable=[n for n in runnable if n not in completed]
+                runnable = self._resolve_level(level, workflow, state)
+                runnable = [n for n in runnable if n not in completed]
+
                 if not runnable:
                     continue
-                tasks=[
-                    self._execute_agent(workflow.agents[name],state,run.run_id)
-                    for name in runnable
 
+                tasks = [
+                    self._execute_agent(workflow.agents[name], state, run.run_id)
+                    for name in runnable
                 ]
-           
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 for name, result in zip(runnable, results):
@@ -83,27 +95,32 @@ class WorkflowEngine:
                             f"{result.error}"
                         )
 
-                    if self.human_loop and getattr(workflow.agents[name],"requires_approval",False):
-                          approval=await self.human_loop.wait_for_approval(
-                            run.run_id,name,result.output
-                          )
-                          if approval.status==ApprovalStatus.REJECTED:
+                    if self.human_loop and getattr(workflow.agents[name], "requires_approval", False):
+                        approval = await self.human_loop.wait_for_approval(
+                            run.run_id, name, result.output
+                        )
+                        if approval.status == ApprovalStatus.REJECTED:
                             self.state_manager.mark_agent_failed(
-                                run.run_id,name,f"Rejected: {approval.feedback}"
+                                run.run_id, name, f"Rejected: {approval.feedback}"
                             )
-                            raise RuntimeError(f"Agent {name!r} rejected by human: {approval.feedback}")
+                            self.state_manager.fail_run(
+                                run.run_id, f"Agent {name!r} rejected: {approval.feedback}"
+                            )
+                            raise RuntimeError(
+                                f"Agent {name!r} rejected by human: {approval.feedback}"
+                            )
 
                     self.state_manager.mark_agent_completed(
                         run.run_id, name, result.output, result.retry_count
                     )
                     state.update(result.output)
                     completed.add(name)
-                if self.checkpoint_store and checkpoint:
-                   checkpoint.completed_agents = list(completed)
-                   checkpoint.shared_state = dict(state)
-                   checkpoint.last_completed_level = level_idx
-                   self.checkpoint_store.save(checkpoint)
 
+                if self.checkpoint_store and checkpoint:
+                    checkpoint.completed_agents = list(completed)
+                    checkpoint.shared_state = dict(state)
+                    checkpoint.last_completed_level = level_idx
+                    self.checkpoint_store.save(checkpoint)
 
             self.state_manager.complete_run(run.run_id)
 
