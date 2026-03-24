@@ -33,6 +33,7 @@ class Agent(ABC):
     backoff_base:float=1.0
     backoff_max:float=30.0
     retry_on:tuple[type[Exception],...]=(Exception)
+    requires_approval:bool=False
 
 
     def __init_subclass__(cls,**kwargs):
