@@ -11,7 +11,9 @@ from vortex.retry import retry_with_backoff
 from vortex.state import StateManager, RunStatus
 from vortex.checkpoint import Checkpoint, CheckpointStore
 from vortex.human_loop import HumanLoop, ApprovalStatus
-
+from vortex.observability.metrics import MetricsCollector
+from vortex.observability.tracing import WorkflowTracer
+from vortex.observability.logging import StructuredLogger
 
 class WorkflowEngine:
 
@@ -20,10 +22,16 @@ class WorkflowEngine:
         state_manager: StateManager | None = None,
         checkpoint_store: CheckpointStore | None = None,
         human_loop: HumanLoop | None = None,
+        logger:StructuredLogger | None=None,
+        metrics:MetricsCollector | None=None,
+        tracer:WorkflowTracer | None=None,
     ):
         self.state_manager = state_manager or StateManager()
         self.checkpoint_store = checkpoint_store
         self.human_loop = human_loop
+        self.logger= logger
+        self.metrics=metrics
+        self.tracer=tracer
 
     async def run(
         self,
@@ -35,6 +43,7 @@ class WorkflowEngine:
 
         start_level = 0
         completed: set[str] = set()
+        wf_start=time.perf_counter()
 
         if resume_run_id and self.checkpoint_store:
             cp = self.checkpoint_store.load(resume_run_id)
@@ -49,6 +58,15 @@ class WorkflowEngine:
         run = self.state_manager.create_run(
             workflow.name, list(workflow.agents.keys()), input_data
         )
+        if self.logger:
+            self.logger.workflow_start(run.run_id,workflow.name)
+        
+        if self.metrics:
+            self.metrics.on_workflow_start()
+
+        if self.tracer:
+            self.tracer.start_workflow_span(run.run_id,workflow.name)
+
 
         for name in completed:
             self.state_manager.mark_agent_completed(run.run_id, name, {})
@@ -86,6 +104,10 @@ class WorkflowEngine:
                         raise result
 
                     if result.status == AgentStatus.FAILED:
+                        if self.logger:
+                            self.logger.agent_failed(run.run_id,name,result.error or "",result.duration_ms,result.retry_count)
+                        if self.metrics:
+                            self.metrics.on_agent_failed(name,result.duration_ms/1000,result.retry_count)
                         self.state_manager.mark_agent_failed(
                             run.run_id, name, result.error or "agent failed", result.retry_count
                         )
@@ -110,6 +132,11 @@ class WorkflowEngine:
                                 f"Agent {name!r} rejected by human: {approval.feedback}"
                             )
 
+                    if self.logger:
+                        self.logger.agent_complete(run.run_id,name)
+                    if self.metrics:
+                        self.metrics.on_agent_complete(name,result.duration_ms/1000,result.retry_count)
+
                     self.state_manager.mark_agent_completed(
                         run.run_id, name, result.output, result.retry_count
                     )
@@ -122,14 +149,31 @@ class WorkflowEngine:
                     checkpoint.last_completed_level = level_idx
                     self.checkpoint_store.save(checkpoint)
 
+            wf_duration=(time.perf_counter()- wf.start)*1000
+
+
             self.state_manager.complete_run(run.run_id)
 
+            if self.logger:
+                self.logger.workflow_complete(run.run_id,workflow.name,wf_duration)
+            if self.metrics:
+                self.metrics.on_workflow_complete(workflow.name,wf_duration/1000)
+            if self.tracer:
+                self.tracer.end_workflow_span(run.run_id,"completed")
             if self.checkpoint_store:
                 self.checkpoint_store.delete(run.run_id)
 
         except Exception as e:
+            wf_duration=(time.perf_counter()-wf_start)*1000
+            
             if self.state_manager.get_run(run.run_id).status != RunStatus.FAILED:
                 self.state_manager.fail_run(run.run_id, str(e))
+            if self.logger:
+                self.logger.workflow_failure(run.run_id,workflow.name,str(e),wf_duration)
+            if self.metrics:
+                self.metrics.on_workflow_failed(workflow.name,wf_duration/1000)
+            if self.tracer:
+                self.tracer.end_workflow_span(run.run_id,"failed")
             raise
 
         return state
@@ -138,6 +182,13 @@ class WorkflowEngine:
         self, agent: Agent, state: dict[str, Any], run_id: str
     ) -> AgentResult:
         self.state_manager.mark_agent_running(run_id, agent.name)
+
+        if self.logger:
+            self.logger.agent_start(run_id,agent.name)
+        
+        agent_span=None
+        if self.tracer:
+            agent_span=self.tracer.start_agent_span(run_id,agent.name)
         start = time.perf_counter()
 
         try:
