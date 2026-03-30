@@ -44,3 +44,25 @@ class WorkflowResponse(BaseModel):
     agent_names:list[str]
     edges:list[WorkflowEdge]
     created_at:datetime
+
+
+#Run Schemas
+class RunCreate(BaseModel):
+    workflow_id:str
+    input_data:dict[str,Any]=Field(default_factory=dict)
+
+class AgentRunSchemas(BaseModel):
+    name:str
+    status:AgentStatusEnum
+    output:dict[str,Any]=Field(default_factory=dict)
+    error:str | None=None
+    retry_count:int=0
+    started_at:float | None=None
+    finished_at:float | None=None
+
+
+
+
+#Approval Schemas
+
+#Agent Registry Schemas
