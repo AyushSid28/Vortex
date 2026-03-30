@@ -8,3 +8,4 @@ sqlalchemy
 opentelemetry-sdk
 pytest
 pytest-asyncio
+prometheus_client
