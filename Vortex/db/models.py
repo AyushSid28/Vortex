@@ -56,4 +56,4 @@ class AgentRunModel(Base):
     duration_ms = Column(Float, default=0.0)
     retry_count = Column(Integer, default=0)
 
-    run = relationship("WorkflowRunModel", back_populates="agent_runs")
+   
