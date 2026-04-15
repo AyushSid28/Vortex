@@ -46,14 +46,6 @@ class WorkflowRunModel(Base):
 class AgentRunModel(Base):
     __tablename__ = "agent_runs"
 
-    id = Column(String(12), primary_key=True, default=gen_id)
-    run_id = Column(String(12), ForeignKey("workflow_runs.id"), nullable=False)
-    agent_name = Column(String(255), nullable=False)
-    status = Column(String(20), default="PENDING")
-    input_data = Column(JSON, default=dict)
-    output_data = Column(JSON, default=dict)
-    error = Column(Text, nullable=True)
-    duration_ms = Column(Float, default=0.0)
-    retry_count = Column(Integer, default=0)
-
    
+
+    run = relationship("WorkflowRunModel", back_populates="agent_runs")
